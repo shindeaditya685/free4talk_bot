@@ -365,8 +365,12 @@ class BotInstance:
             self.monitor_task.cancel()
             try:
                 await self.monitor_task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
+            finally:
+                self.monitor_task = None
         try:
             if self.browser_context:
                 await self.browser_context.close()
