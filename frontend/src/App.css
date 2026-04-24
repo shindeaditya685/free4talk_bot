@@ -1,0 +1,12 @@
+.App {
+    min-height: 100vh;
+}
+
+::selection {
+    background: rgb(52 211 153 / 0.35);
+    color: #ecfdf5;
+}
+
+body {
+    background: #0b0b0d;
+}
