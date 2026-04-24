@@ -25,7 +25,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
@@ -272,19 +272,15 @@ api_router = APIRouter(prefix="/api")
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if (
-        not AUTH_ENABLED
-        or _is_public_path(request.url.path)
-        or _is_authenticated(request.cookies.get(AUTH_COOKIE_NAME))
-    ):
+    if not AUTH_ENABLED or _is_public_path(request.url.path):
         return await call_next(request)
 
     accepts_html = "text/html" in request.headers.get("accept", "")
-    if request.url.path.startswith("/api/") and not accepts_html:
-        return JSONResponse(
-            {"detail": "Authentication required"},
-            status_code=status.HTTP_401_UNAUTHORIZED,
-        )
+    if not accepts_html:
+        return await call_next(request)
+
+    if _is_authenticated(request.cookies.get(AUTH_COOKIE_NAME)):
+        return await call_next(request)
 
     next_path = _next_target(request.url.path, request.url.query)
     return RedirectResponse(
