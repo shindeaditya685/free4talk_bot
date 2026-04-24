@@ -198,79 +198,87 @@ export default function Dashboard() {
           </p>
         </div>
 
-        <Dialog open={open} onOpenChange={setOpen}>
-          <DialogTrigger asChild>
-            <Button
-              data-testid="new-bot-button"
-              className="h-11 rounded-full bg-emerald-400 px-6 font-semibold text-black hover:bg-emerald-300"
-            >
-              <Plus className="mr-2 h-4 w-4" /> New bot
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="border-zinc-800 bg-[#111113] text-zinc-100">
-            <DialogHeader>
-              <DialogTitle>Deploy a new bot</DialogTitle>
-            </DialogHeader>
-            <form onSubmit={handleCreate} className="mt-2 space-y-4">
-              <div>
-                <Label htmlFor="nick" className="text-xs text-zinc-400">
-                  Nickname
-                </Label>
-                <Input
-                  id="nick"
-                  data-testid="form-nickname"
-                  value={form.nickname}
-                  onChange={(event) =>
-                    setForm({ ...form, nickname: event.target.value })
-                  }
-                  placeholder="e.g. study-vc666"
-                  className="mt-1 border-zinc-800 bg-zinc-900"
-                />
-              </div>
-              <div>
-                <Label htmlFor="url" className="text-xs text-zinc-400">
-                  Free4talk room URL
-                </Label>
-                <Input
-                  id="url"
-                  data-testid="form-room-url"
-                  value={form.room_url}
-                  onChange={(event) =>
-                    setForm({ ...form, room_url: event.target.value })
-                  }
-                  placeholder="https://www.free4talk.com/room/vc666?key=694049"
-                  className="mt-1 border-zinc-800 bg-zinc-900 font-mono text-xs"
-                />
-              </div>
-              <div className="flex items-center justify-between">
-                <Label htmlFor="auto" className="text-xs text-zinc-400">
-                  Auto-start on server restart
-                </Label>
-                <Switch
-                  id="auto"
-                  data-testid="form-auto-start"
-                  checked={form.auto_start}
-                  onCheckedChange={(value) =>
-                    setForm({ ...form, auto_start: value })
-                  }
-                />
-              </div>
-              <DialogFooter>
-                <Button
-                  type="submit"
-                  data-testid="form-submit"
-                  disabled={creating}
-                  className="rounded-full bg-emerald-400 text-black hover:bg-emerald-300"
-                >
-                  {creating && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  )}
-                  Deploy bot
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+        <div className="flex items-center gap-3">
+          <a
+            href="/logout"
+            className="text-sm text-zinc-500 transition-colors hover:text-zinc-200"
+          >
+            Log out
+          </a>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>
+              <Button
+                data-testid="new-bot-button"
+                className="h-11 rounded-full bg-emerald-400 px-6 font-semibold text-black hover:bg-emerald-300"
+              >
+                <Plus className="mr-2 h-4 w-4" /> New bot
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="border-zinc-800 bg-[#111113] text-zinc-100">
+              <DialogHeader>
+                <DialogTitle>Deploy a new bot</DialogTitle>
+              </DialogHeader>
+              <form onSubmit={handleCreate} className="mt-2 space-y-4">
+                <div>
+                  <Label htmlFor="nick" className="text-xs text-zinc-400">
+                    Nickname
+                  </Label>
+                  <Input
+                    id="nick"
+                    data-testid="form-nickname"
+                    value={form.nickname}
+                    onChange={(event) =>
+                      setForm({ ...form, nickname: event.target.value })
+                    }
+                    placeholder="e.g. study-vc666"
+                    className="mt-1 border-zinc-800 bg-zinc-900"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="url" className="text-xs text-zinc-400">
+                    Free4talk room URL
+                  </Label>
+                  <Input
+                    id="url"
+                    data-testid="form-room-url"
+                    value={form.room_url}
+                    onChange={(event) =>
+                      setForm({ ...form, room_url: event.target.value })
+                    }
+                    placeholder="https://www.free4talk.com/room/vc666?key=694049"
+                    className="mt-1 border-zinc-800 bg-zinc-900 font-mono text-xs"
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="auto" className="text-xs text-zinc-400">
+                    Auto-start on server restart
+                  </Label>
+                  <Switch
+                    id="auto"
+                    data-testid="form-auto-start"
+                    checked={form.auto_start}
+                    onCheckedChange={(value) =>
+                      setForm({ ...form, auto_start: value })
+                    }
+                  />
+                </div>
+                <DialogFooter>
+                  <Button
+                    type="submit"
+                    data-testid="form-submit"
+                    disabled={creating}
+                    className="rounded-full bg-emerald-400 text-black hover:bg-emerald-300"
+                  >
+                    {creating && (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    )}
+                    Deploy bot
+                  </Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
+        </div>
       </header>
 
       {loading ? (

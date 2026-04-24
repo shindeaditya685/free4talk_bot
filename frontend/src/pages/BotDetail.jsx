@@ -147,6 +147,12 @@ export default function BotDetail({ botId }) {
         >
           <RefreshCw className="h-3.5 w-3.5" />
         </Button>
+        <a
+          href="/logout"
+          className="text-sm text-zinc-500 transition-colors hover:text-zinc-100"
+        >
+          Log out
+        </a>
       </header>
 
       {bot.last_message ? (

@@ -4,15 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
+import html
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
@@ -32,6 +45,176 @@ logger = logging.getLogger("server")
 FRONTEND_DIST_DIR = ROOT_DIR.parent / "frontend" / "dist"
 FRONTEND_INDEX_FILE = FRONTEND_DIST_DIR / "index.html"
 bot_store, store_mode = create_bot_store(DATA_DIR.parent / "bots.json")
+
+
+def _first_env(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+AUTH_USERNAME = _first_env("AUTH_USERNAME", "USER_NAME", "user_name")
+AUTH_PASSWORD = _first_env("AUTH_PASSWORD", "PASSWORD", "password")
+AUTH_ENABLED = bool(AUTH_USERNAME and AUTH_PASSWORD)
+AUTH_COOKIE_NAME = os.environ.get("AUTH_COOKIE_NAME", "free4talk_auth")
+AUTH_SECRET = os.environ.get("AUTH_SECRET") or hashlib.sha256(
+    f"{AUTH_USERNAME}:{AUTH_PASSWORD}:free4talk-auth".encode("utf-8")
+).hexdigest()
+
+
+def _signed_auth_value(value: str) -> str:
+    signature = hmac.new(
+        AUTH_SECRET.encode("utf-8"),
+        value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{value}.{signature}"
+
+
+def _is_authenticated(cookie_value: str | None) -> bool:
+    if not AUTH_ENABLED:
+        return True
+
+    if not cookie_value:
+        return False
+
+    try:
+        value, signature = cookie_value.rsplit(".", 1)
+    except ValueError:
+        return False
+
+    expected = hmac.new(
+        AUTH_SECRET.encode("utf-8"),
+        value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return value == "authenticated" and hmac.compare_digest(signature, expected)
+
+
+def _set_auth_cookie(response: RedirectResponse, secure: bool) -> None:
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        _signed_auth_value("authenticated"),
+        httponly=True,
+        max_age=60 * 60 * 24 * 30,
+        path="/",
+        samesite="lax",
+        secure=secure,
+    )
+
+
+def _clear_auth_cookie(response: RedirectResponse) -> None:
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+
+
+def _is_public_path(path: str) -> bool:
+    return path in {"/healthz", "/login", "/logout"}
+
+
+def _next_target(path: str, query: str = "") -> str:
+    if query:
+        return f"{path}?{query}"
+    return path
+
+
+def _render_login_page(next_path: str, error: str = "") -> HTMLResponse:
+    error_html = ""
+    if error:
+        error_html = (
+            '<p style="margin:16px 0 0;color:#fca5a5;font-size:14px;">'
+            f"{html.escape(error)}"
+            "</p>"
+        )
+
+    safe_next = html.escape(next_path, quote=True)
+    return HTMLResponse(
+        f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top, rgb(16 185 129 / 18%), transparent 40%),
+        linear-gradient(180deg, #09090b 0%, #111113 100%);
+      color: #f4f4f5;
+      font-family: Inter, system-ui, sans-serif;
+      padding: 24px;
+    }}
+    .panel {{
+      width: min(420px, 100%);
+      padding: 28px;
+      border-radius: 24px;
+      border: 1px solid #27272a;
+      background: rgb(17 17 19 / 92%);
+      box-shadow: 0 24px 80px rgb(0 0 0 / 35%);
+    }}
+    .eyebrow {{
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.24em;
+      color: #34d399;
+      font-family: ui-monospace, monospace;
+    }}
+    h1 {{ margin: 12px 0 0; font-size: 28px; }}
+    p {{ margin: 12px 0 0; color: #a1a1aa; line-height: 1.6; }}
+    label {{
+      display: block;
+      margin: 18px 0 6px;
+      font-size: 13px;
+      color: #d4d4d8;
+    }}
+    input {{
+      width: 100%;
+      border: 1px solid #3f3f46;
+      background: #09090b;
+      color: #fafafa;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-size: 14px;
+    }}
+    button {{
+      width: 100%;
+      margin-top: 20px;
+      border: 0;
+      border-radius: 999px;
+      background: #34d399;
+      color: #052e1a;
+      font-weight: 700;
+      padding: 12px 16px;
+      font-size: 14px;
+      cursor: pointer;
+    }}
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <div class="eyebrow">Protected dashboard</div>
+    <h1>Sign in</h1>
+    <p>Use the credentials configured in <code>backend/.env</code>.</p>
+    {error_html}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{safe_next}">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Open dashboard</button>
+    </form>
+  </main>
+</body>
+</html>"""
+    )
 
 
 async def _load_bot(bot_id: str) -> Bot:
@@ -85,6 +268,72 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Free4Talk Persistence Bot", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if (
+        not AUTH_ENABLED
+        or _is_public_path(request.url.path)
+        or _is_authenticated(request.cookies.get(AUTH_COOKIE_NAME))
+    ):
+        return await call_next(request)
+
+    accepts_html = "text/html" in request.headers.get("accept", "")
+    if request.url.path.startswith("/api/") and not accepts_html:
+        return JSONResponse(
+            {"detail": "Authentication required"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    next_path = _next_target(request.url.path, request.url.query)
+    return RedirectResponse(
+        url=f"/login?next={quote(next_path, safe='/?=&%:_-')}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.get("/login", include_in_schema=False)
+async def login_page(request: Request, next: str = "/"):
+    if not AUTH_ENABLED:
+        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+
+    if _is_authenticated(request.cookies.get(AUTH_COOKIE_NAME)):
+        return RedirectResponse(next or "/", status_code=status.HTTP_303_SEE_OTHER)
+
+    return _render_login_page(next if next.startswith("/") else "/")
+
+
+@app.post("/login", include_in_schema=False)
+async def login_submit(
+    request: Request,
+    username: str = Form(""),
+    password: str = Form(""),
+    next: str = Form("/"),
+):
+    if not AUTH_ENABLED:
+        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+
+    safe_next = next if next.startswith("/") else "/"
+    if username != AUTH_USERNAME or password != AUTH_PASSWORD:
+        return _render_login_page(safe_next, "Invalid username or password")
+
+    response = RedirectResponse(
+        url=safe_next,
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+    _set_auth_cookie(response, secure=request.url.scheme == "https")
+    return response
+
+
+@app.get("/logout", include_in_schema=False)
+async def logout():
+    response = RedirectResponse(
+        url="/login",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+    _clear_auth_cookie(response)
+    return response
 
 
 @api_router.get("/")
@@ -206,6 +455,10 @@ async def bot_status(bot_id: str):
 
 @app.websocket("/api/bots/{bot_id}/vnc-ws")
 async def vnc_ws_proxy(websocket: WebSocket, bot_id: str):
+    if AUTH_ENABLED and not _is_authenticated(websocket.cookies.get(AUTH_COOKIE_NAME)):
+        await websocket.close(code=1008, reason="authentication required")
+        return
+
     instance = bot_manager.get(bot_id)
     if not instance or not instance.running:
         await websocket.close(code=1008, reason="bot not running")

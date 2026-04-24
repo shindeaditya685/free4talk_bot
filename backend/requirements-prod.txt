@@ -4,4 +4,5 @@ playwright==1.49.0
 pydantic>=2.6.4
 pymongo==4.5.0
 python-dotenv>=1.0.1
+python-multipart>=0.0.9
 uvicorn[standard]==0.25.0
