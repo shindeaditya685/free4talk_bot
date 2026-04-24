@@ -399,6 +399,7 @@ class BotInstance:
 class BotManager:
     def __init__(self) -> None:
         self.instances: Dict[str, BotInstance] = {}
+        self._start_tasks: Dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
     def _used_displays(self) -> set[int]:
@@ -407,43 +408,86 @@ class BotManager:
     def _used_ports(self) -> set[int]:
         return {b.vnc_port for b in self.instances.values()}
 
-    async def start_bot(self, bot_id: str, nickname: str, room_url: str) -> BotInstance:
-        async with self._lock:
-            if bot_id in self.instances and self.instances[bot_id].running:
-                return self.instances[bot_id]
-            display_num = _find_free_display(self._used_displays())
-            vnc_port = _find_free_port(
-                VNC_PORT_BASE, VNC_PORT_BASE + 200, self._used_ports()
-            )
-            user_data_dir = DATA_DIR / bot_id
-            inst = BotInstance(
-                bot_id=bot_id,
-                nickname=nickname,
-                room_url=room_url,
-                display_num=display_num,
-                vnc_port=vnc_port,
-                user_data_dir=user_data_dir,
-            )
-            self.instances[bot_id] = inst
+    def _is_active_instance(self, inst: BotInstance) -> bool:
+        return inst.running or inst.status in {
+            "starting",
+            "waiting_login",
+            "joining",
+            "in_room",
+            "disconnected",
+        }
+
+    async def _run_start(self, inst: BotInstance) -> BotInstance:
         try:
             await inst.start()
-        except Exception:
+            return inst
+        except BaseException:
             try:
                 await inst.stop()
             except Exception:
-                logger.exception("cleanup failed after start_bot error for %s", bot_id)
+                logger.exception("cleanup failed after start_bot error for %s", inst.bot_id)
 
             async with self._lock:
-                self.instances.pop(bot_id, None)
+                if self.instances.get(inst.bot_id) is inst:
+                    self.instances.pop(inst.bot_id, None)
             raise
-        return inst
+        finally:
+            async with self._lock:
+                current_task = self._start_tasks.get(inst.bot_id)
+                if current_task is asyncio.current_task():
+                    self._start_tasks.pop(inst.bot_id, None)
+
+    async def start_bot(self, bot_id: str, nickname: str, room_url: str) -> BotInstance:
+        async with self._lock:
+            existing = self.instances.get(bot_id)
+            start_task = self._start_tasks.get(bot_id)
+
+            if start_task is None and existing and self._is_active_instance(existing):
+                return existing
+
+            if start_task is None:
+                display_num = _find_free_display(self._used_displays())
+                vnc_port = _find_free_port(
+                    VNC_PORT_BASE, VNC_PORT_BASE + 200, self._used_ports()
+                )
+                user_data_dir = DATA_DIR / bot_id
+                inst = BotInstance(
+                    bot_id=bot_id,
+                    nickname=nickname,
+                    room_url=room_url,
+                    display_num=display_num,
+                    vnc_port=vnc_port,
+                    user_data_dir=user_data_dir,
+                )
+                self.instances[bot_id] = inst
+                start_task = asyncio.create_task(self._run_start(inst))
+                self._start_tasks[bot_id] = start_task
+
+        return await start_task
 
     async def stop_bot(self, bot_id: str) -> None:
-        inst = self.instances.get(bot_id)
+        async with self._lock:
+            inst = self.instances.get(bot_id)
+            start_task = self._start_tasks.get(bot_id)
+
+        if start_task and not start_task.done():
+            start_task.cancel()
+            try:
+                await start_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+            async with self._lock:
+                inst = self.instances.get(bot_id)
+
         if not inst:
             return
         await inst.stop()
-        self.instances.pop(bot_id, None)
+        async with self._lock:
+            if self.instances.get(bot_id) is inst:
+                self.instances.pop(bot_id, None)
 
     async def delete_bot_data(self, bot_id: str) -> None:
         await self.stop_bot(bot_id)
