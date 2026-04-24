@@ -74,6 +74,27 @@ def _find_free_display(used: set[int]) -> int:
     raise RuntimeError("no free X display")
 
 
+def _cleanup_profile_locks(user_data_dir: Path) -> None:
+    """Remove stale Chromium singleton lock artifacts from persistent profiles."""
+    lock_names = (
+        "SingletonCookie",
+        "SingletonLock",
+        "SingletonSocket",
+    )
+
+    for name in lock_names:
+        target = user_data_dir / name
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning("failed to clear stale profile lock %s: %s", target, exc)
+
+
 @dataclass
 class BotInstance:
     bot_id: str
@@ -161,6 +182,7 @@ class BotInstance:
     async def start(self) -> None:
         self.stop_requested = False
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
+        _cleanup_profile_locks(self.user_data_dir)
         env = os.environ.copy()
 
         if _supports_managed_vnc():
@@ -342,11 +364,16 @@ class BotInstance:
                 await self.browser_context.close()
         except Exception as e:
             logger.warning(f"ctx close err: {e}")
+        finally:
+            self.browser_context = None
+            self.page = None
         try:
             if self.playwright_ctx:
                 await self.playwright_ctx.stop()
         except Exception as e:
             logger.warning(f"pw stop err: {e}")
+        finally:
+            self.playwright_ctx = None
         for proc in (self.vnc_proc, self.xvfb_proc):
             if proc and proc.poll() is None:
                 try:
@@ -356,6 +383,8 @@ class BotInstance:
                         proc.kill()
                 except Exception:
                     pass
+        self.vnc_proc = None
+        self.xvfb_proc = None
         self.set_status("stopped", "Stopped")
 
 
