@@ -231,6 +231,10 @@ async def _save_bot(bot: Bot) -> None:
 
 async def _startup() -> None:
     logger.info("Server starting - bot store %s", store_mode)
+    if AUTH_ENABLED:
+        logger.info("Dashboard auth enabled for user %s", AUTH_USERNAME)
+    else:
+        logger.info("Dashboard auth disabled")
     logger.info("Server starting - auto-start bots with auto_start=True")
     try:
         docs = await bot_store.list_bots()
