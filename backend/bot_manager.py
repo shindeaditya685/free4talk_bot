@@ -119,10 +119,18 @@ class BotInstance:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def set_status(self, status: str, message: str = "") -> None:
+        next_message = message or self.last_message
+        status_changed = status != self.status
+        message_changed = next_message != self.last_message
+
         self.status = status
         if message:
             self.last_message = message
-        logger.info(f"[{self.bot_id[:8]}] status={status} msg={message}")
+
+        if status_changed or message_changed:
+            logger.info(
+                f"[{self.bot_id[:8]}] status={self.status} msg={self.last_message}"
+            )
 
     def login_instructions(self) -> str:
         if self.vnc_available:
