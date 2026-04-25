@@ -542,53 +542,78 @@ VNC_VIEWER_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Bot Viewer</title>
 <style>
+  :root {
+    color-scheme: dark;
+  }
   html, body {
     margin: 0;
     padding: 0;
     background: #0a0a0b;
     color: #eaeaea;
     font-family: ui-monospace, monospace;
-    height: 100%;
+    min-height: 100%;
     overflow: hidden;
   }
   #topbar {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
+    top: 12px;
+    left: 12px;
+    right: 12px;
     display: flex;
-    gap: 12px;
+    gap: 10px;
     align-items: center;
-    padding: 8px 14px;
-    background: #141416;
-    border-bottom: 1px solid #27272a;
+    padding: 10px 12px;
+    background: rgb(20 20 22 / 78%);
+    border: 1px solid rgb(63 63 70 / 78%);
+    border-radius: 999px;
+    backdrop-filter: blur(14px);
+    box-shadow: 0 16px 48px rgb(0 0 0 / 34%);
     z-index: 10;
     font-size: 12px;
+    pointer-events: none;
+  }
+  #label {
+    font-weight: 700;
+    white-space: nowrap;
   }
   #status {
     padding: 2px 8px;
     border-radius: 999px;
     background: #27272a;
     color: #a1a1aa;
+    white-space: nowrap;
   }
   #status.ok { background: #052e1a; color: #4ade80; }
   #status.err { background: #3a0a0a; color: #ef4444; }
+  #hint {
+    margin-left: auto;
+    color: #a1a1aa;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   #screen {
-    position: absolute;
-    top: 42px;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    position: fixed;
+    inset: 0;
     background: #000;
   }
   a { color: #4ade80; }
+  @media (max-width: 840px) {
+    #topbar {
+      right: auto;
+      max-width: calc(100vw - 24px);
+    }
+    #hint {
+      display: none;
+    }
+  }
 </style>
 </head>
 <body>
 <div id="topbar">
-  <strong>VNC - __BOT_ID__</strong>
+  <strong id="label">VNC - __BOT_ID__</strong>
   <span id="status">connecting...</span>
-  <span style="margin-left:auto;color:#71717a">
+  <span id="hint">
     Sign in to Google here once. Session persists.
   </span>
 </div>
@@ -600,6 +625,7 @@ VNC_VIEWER_HTML = """<!DOCTYPE html>
   const url = `${proto}://${location.host}/api/bots/__BOT_ID__/vnc-ws`;
   const rfb = new RFB(document.getElementById("screen"), url, {});
   rfb.viewOnly = false;
+  rfb.clipViewport = false;
   rfb.scaleViewport = true;
   rfb.resizeSession = false;
   rfb.addEventListener("connect", () => {

@@ -40,7 +40,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DISPLAY_BASE = 99
 VNC_PORT_BASE = 5900
-SCREEN_GEOMETRY = "1280x800x24"
+SCREEN_WIDTH = 1366
+SCREEN_HEIGHT = 768
+SCREEN_GEOMETRY = f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}x24"
 
 
 def _supports_managed_vnc() -> bool:
@@ -116,6 +118,7 @@ class BotInstance:
     in_room: bool = False
     logged_in: bool = False
     vnc_available: bool = False
+    fullscreen_applied: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def set_status(self, status: str, message: str = "") -> None:
@@ -153,7 +156,7 @@ class BotInstance:
         launch_options = {
             "user_data_dir": str(self.user_data_dir),
             "headless": False,
-            "viewport": {"width": 1280, "height": 800},
+            "viewport": {"width": SCREEN_WIDTH, "height": SCREEN_HEIGHT},
             "args": launch_args,
             "env": env,
             "ignore_default_args": ["--enable-automation"],
@@ -249,7 +252,7 @@ class BotInstance:
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
             "--window-position=0,0",
-            "--window-size=1280,800",
+            f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}",
             "--start-maximized",
         ]
 
@@ -337,6 +340,14 @@ class BotInstance:
                     except Exception as e:
                         logger.warning(f"goto failed: {e}")
                 elif currently_in_room and self.logged_in:
+                    if self.vnc_available and not self.fullscreen_applied:
+                        try:
+                            await self.page.keyboard.press("F11")
+                            self.fullscreen_applied = True
+                            self.set_status("in_room", "Entered fullscreen room view")
+                        except Exception as e:
+                            logger.warning(f"fullscreen failed: {e}")
+
                     msg = "In room (silent presence)"
                     if clicked_start:
                         msg = "Clicked start overlay"

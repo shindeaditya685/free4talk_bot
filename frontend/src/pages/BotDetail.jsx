@@ -9,7 +9,14 @@ import { api, viewerUrl, startBot, stopBot } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { toast } from "sonner";
-import { ArrowLeft, Play, Square, RefreshCw } from "lucide-react";
+import {
+  ArrowLeft,
+  ExternalLink,
+  Maximize2,
+  Play,
+  RefreshCw,
+  Square,
+} from "lucide-react";
 import { Link } from "../components/AppLink";
 import { navigate } from "../lib/router";
 
@@ -28,6 +35,7 @@ export default function BotDetail({ botId }) {
   const [bot, setBot] = useState(null);
   const [iframeKey, setIframeKey] = useState(0);
   const mountedRef = useRef(true);
+  const viewerShellRef = useRef(null);
 
   const refreshBot = useCallback(async () => {
     try {
@@ -92,15 +100,35 @@ export default function BotDetail({ botId }) {
     }
   };
 
+  const handleViewerFullscreen = async () => {
+    const shell = viewerShellRef.current;
+
+    if (!shell) {
+      return;
+    }
+
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen();
+        return;
+      }
+
+      await shell.requestFullscreen();
+    } catch {
+      toast.error("Could not open fullscreen viewer");
+    }
+  };
+
   if (!bot) {
     return <div className="p-10 text-zinc-500">Loading...</div>;
   }
 
   const isRunning = bot.status !== "stopped" && bot.status !== "idle";
+  const currentViewerUrl = viewerUrl(bot.id);
 
   return (
     <div className="flex min-h-screen flex-col" data-testid="bot-detail-root">
-      <header className="flex items-center gap-4 border-b border-zinc-800 bg-[#0f0f11] px-6 py-4">
+      <header className="flex items-center gap-3 border-b border-zinc-800 bg-[#0f0f11] px-4 py-3">
         <Link to="/" className="text-zinc-400 hover:text-zinc-100">
           <ArrowLeft className="h-5 w-5" />
         </Link>
@@ -147,6 +175,28 @@ export default function BotDetail({ botId }) {
         >
           <RefreshCw className="h-3.5 w-3.5" />
         </Button>
+        {isRunning ? (
+          <>
+            <Button
+              onClick={handleViewerFullscreen}
+              size="sm"
+              variant="outline"
+              className="rounded-full border-zinc-700 bg-transparent text-zinc-200 hover:bg-zinc-800"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              asChild
+              size="sm"
+              variant="outline"
+              className="rounded-full border-zinc-700 bg-transparent text-zinc-200 hover:bg-zinc-800"
+            >
+              <a href={currentViewerUrl} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            </Button>
+          </>
+        ) : null}
         <a
           href="/logout"
           className="text-sm text-zinc-500 transition-colors hover:text-zinc-100"
@@ -155,22 +205,28 @@ export default function BotDetail({ botId }) {
         </a>
       </header>
 
-      {bot.last_message ? (
-        <div className="border-b border-zinc-800 bg-[#0b0b0d] px-6 py-2 text-[12px] text-zinc-400">
-          {bot.last_message}
-        </div>
-      ) : null}
-
-      <div className="relative flex-1 bg-black">
+      <div
+        ref={viewerShellRef}
+        className="relative flex-1 overflow-hidden bg-black"
+      >
         {isRunning ? (
-          <iframe
-            key={iframeKey}
-            data-testid="vnc-iframe"
-            title="vnc"
-            src={viewerUrl(bot.id)}
-            className="absolute inset-0 h-full w-full border-0"
-            allow="clipboard-write; clipboard-read"
-          />
+          <>
+            <iframe
+              key={iframeKey}
+              data-testid="vnc-iframe"
+              title="vnc"
+              src={currentViewerUrl}
+              className="absolute inset-0 h-full w-full border-0"
+              allow="clipboard-write; clipboard-read"
+            />
+            {bot.last_message ? (
+              <div className="pointer-events-none absolute right-4 bottom-4 left-4 z-10 flex justify-start">
+                <div className="max-w-full rounded-full border border-zinc-700/70 bg-black/70 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur">
+                  {bot.last_message}
+                </div>
+              </div>
+            ) : null}
+          </>
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-zinc-500">
             <div>Bot is stopped.</div>
