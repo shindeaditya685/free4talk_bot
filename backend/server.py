@@ -77,7 +77,11 @@ AUTH_SECRET = os.environ.get("AUTH_SECRET") or hashlib.sha256(
     f"{AUTH_USERNAME}:{AUTH_PASSWORD}:free4talk-auth".encode("utf-8")
 ).hexdigest()
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-TELEGRAM_BOT_TOKEN = _first_env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = _first_env(
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_TOKEN",
+    "BOT_TOKEN",
+)
 TELEGRAM_ALLOWED_CHAT_IDS = _parse_int_env_set(
     os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
 )
@@ -372,6 +376,16 @@ async def _startup() -> None:
         logger.info("Dashboard auth enabled for user %s", AUTH_USERNAME)
     else:
         logger.info("Dashboard auth disabled")
+    if TELEGRAM_BOT_TOKEN:
+        logger.info(
+            "Telegram token detected (length=%s, allowed_chats=%s)",
+            len(TELEGRAM_BOT_TOKEN),
+            len(TELEGRAM_ALLOWED_CHAT_IDS),
+        )
+    else:
+        logger.info(
+            "Telegram token missing. Checked env names: TELEGRAM_BOT_TOKEN, TELEGRAM_TOKEN, BOT_TOKEN"
+        )
     logger.info("Server starting - auto-start bots with auto_start=True")
     try:
         docs = await bot_store.list_bots()
