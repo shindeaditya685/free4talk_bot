@@ -32,6 +32,7 @@ from starlette.middleware.cors import CORSMiddleware
 from bot_manager import DATA_DIR, bot_manager
 from models import Bot, BotCreate, BotRuntimeInfo, BotStatus, BotUpdate, now_iso
 from store import create_bot_store
+from telegram_bot import TelegramCallbacks, TelegramControlBot
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -55,6 +56,19 @@ def _first_env(*names: str) -> str:
     return ""
 
 
+def _parse_int_env_set(raw_value: str) -> set[int]:
+    values: set[int] = set()
+    for part in raw_value.split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        try:
+            values.add(int(piece))
+        except ValueError:
+            logger.warning("Ignoring invalid integer env value: %s", piece)
+    return values
+
+
 AUTH_USERNAME = _first_env("AUTH_USERNAME", "USER_NAME", "user_name")
 AUTH_PASSWORD = _first_env("AUTH_PASSWORD", "PASSWORD", "password")
 AUTH_ENABLED = bool(AUTH_USERNAME and AUTH_PASSWORD)
@@ -62,6 +76,11 @@ AUTH_COOKIE_NAME = os.environ.get("AUTH_COOKIE_NAME", "free4talk_auth")
 AUTH_SECRET = os.environ.get("AUTH_SECRET") or hashlib.sha256(
     f"{AUTH_USERNAME}:{AUTH_PASSWORD}:free4talk-auth".encode("utf-8")
 ).hexdigest()
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+TELEGRAM_BOT_TOKEN = _first_env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_ALLOWED_CHAT_IDS = _parse_int_env_set(
+    os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
+)
 
 
 def _signed_auth_value(value: str) -> str:
@@ -229,6 +248,124 @@ async def _save_bot(bot: Bot) -> None:
     await bot_store.save_bot(bot.model_dump())
 
 
+def _apply_runtime(bot: Bot) -> Bot:
+    runtime = bot_manager.runtime_info(bot.id)
+
+    if runtime["running"]:
+        try:
+            bot.status = BotStatus(runtime["status"])
+        except ValueError:
+            pass
+        bot.last_message = runtime["last_message"]
+        bot.logged_in = runtime["logged_in"]
+    elif bot.status not in (BotStatus.STOPPED, BotStatus.IDLE, BotStatus.ERROR):
+        bot.status = BotStatus.STOPPED
+        bot.last_message = "Not running - click Start"
+
+    return bot
+
+
+async def _list_bots_with_runtime() -> list[Bot]:
+    docs = await bot_store.list_bots()
+    return [_apply_runtime(Bot(**doc)) for doc in docs]
+
+
+async def _create_bot_record(
+    nickname: str,
+    room_url: str,
+    auto_start: bool = True,
+) -> Bot:
+    bot = Bot(
+        nickname=nickname,
+        room_url=room_url.strip(),
+        auto_start=auto_start,
+    )
+    await _save_bot(bot)
+    return bot
+
+
+async def _start_bot_record(bot_id: str) -> Bot:
+    bot = await _load_bot(bot_id)
+    instance = await bot_manager.start_bot(bot.id, bot.nickname, bot.room_url)
+    bot.status = BotStatus.STARTING
+    bot.display_num = instance.display_num
+    bot.vnc_port = instance.vnc_port
+    bot.last_message = instance.last_message
+    await _save_bot(bot)
+    return _apply_runtime(bot)
+
+
+async def _stop_bot_record(bot_id: str) -> Bot:
+    bot = await _load_bot(bot_id)
+    await bot_manager.stop_bot(bot_id)
+    bot.status = BotStatus.STOPPED
+    bot.last_message = "Stopped by user"
+    await _save_bot(bot)
+    return bot
+
+
+async def _delete_bot_record(bot_id: str) -> str:
+    await _load_bot(bot_id)
+    await bot_manager.delete_bot_data(bot_id)
+    await bot_store.delete_bot(bot_id)
+    return bot_id
+
+
+telegram_control_bot = TelegramControlBot(
+    token=TELEGRAM_BOT_TOKEN,
+    callbacks=TelegramCallbacks(
+        list_bots=lambda: _telegram_list_bots(),
+        create_bot=lambda nickname, room_url, auto_start: _telegram_create_bot(
+            nickname, room_url, auto_start
+        ),
+        start_bot=lambda bot_id: _telegram_start_bot(bot_id),
+        stop_bot=lambda bot_id: _telegram_stop_bot(bot_id),
+        delete_bot=lambda bot_id: _delete_bot_record(bot_id),
+    ),
+    allowed_chat_ids=TELEGRAM_ALLOWED_CHAT_IDS,
+    public_base_url=PUBLIC_BASE_URL,
+)
+
+
+async def _telegram_list_bots() -> list[dict]:
+    return [bot.model_dump() for bot in await _list_bots_with_runtime()]
+
+
+async def _telegram_create_bot(
+    nickname: str,
+    room_url: str,
+    auto_start: bool,
+) -> dict:
+    return (await _create_bot_record(nickname, room_url, auto_start)).model_dump()
+
+
+async def _telegram_start_bot(bot_id: str) -> dict:
+    return (await _start_bot_record(bot_id)).model_dump()
+
+
+async def _telegram_stop_bot(bot_id: str) -> dict:
+    return (await _stop_bot_record(bot_id)).model_dump()
+
+
+async def _handle_bot_event(event: dict) -> None:
+    if not telegram_control_bot.enabled:
+        return
+
+    if event.get("kind") != "crash":
+        return
+
+    await telegram_control_bot.notify_crash(
+        bot_id=str(event.get("bot_id", "")),
+        nickname=str(event.get("nickname", "Bot")),
+        room_url=str(event.get("room_url", "")),
+        message=str(event.get("message", "Chromium crashed")),
+        recovery_failed=bool(event.get("recovery_failed")),
+    )
+
+
+bot_manager.set_event_notifier(_handle_bot_event)
+
+
 async def _startup() -> None:
     logger.info("Server starting - bot store %s", store_mode)
     if AUTH_ENABLED:
@@ -250,8 +387,14 @@ async def _startup() -> None:
     except Exception as exc:
         logger.exception("auto-start scan failed: %s", exc)
 
+    if telegram_control_bot.enabled:
+        await telegram_control_bot.start()
+    else:
+        logger.info("Telegram bot disabled")
+
 
 async def _shutdown() -> None:
+    await telegram_control_bot.stop()
     logger.info("Server shutting down - stopping bots")
     for bot_id in list(bot_manager.instances.keys()):
         try:
@@ -343,57 +486,21 @@ async def root():
 
 @api_router.get("/bots", response_model=list[Bot])
 async def list_bots():
-    docs = await bot_store.list_bots()
-    bots: list[Bot] = []
-
-    for doc in docs:
-        bot = Bot(**doc)
-        runtime = bot_manager.runtime_info(bot.id)
-
-        if runtime["running"]:
-            try:
-                bot.status = BotStatus(runtime["status"])
-            except ValueError:
-                pass
-            bot.last_message = runtime["last_message"]
-            bot.logged_in = runtime["logged_in"]
-        elif bot.status not in (BotStatus.STOPPED, BotStatus.IDLE, BotStatus.ERROR):
-            bot.status = BotStatus.STOPPED
-            bot.last_message = "Not running - click Start"
-
-        bots.append(bot)
-
-    return bots
+    return await _list_bots_with_runtime()
 
 
 @api_router.post("/bots", response_model=Bot)
 async def create_bot(payload: BotCreate):
-    bot = Bot(
-        nickname=payload.nickname,
-        room_url=payload.room_url.strip(),
-        auto_start=payload.auto_start,
+    return await _create_bot_record(
+        payload.nickname,
+        payload.room_url,
+        payload.auto_start,
     )
-    await _save_bot(bot)
-    return bot
 
 
 @api_router.get("/bots/{bot_id}", response_model=Bot)
 async def get_bot(bot_id: str):
-    bot = await _load_bot(bot_id)
-    runtime = bot_manager.runtime_info(bot.id)
-
-    if runtime["running"]:
-        try:
-            bot.status = BotStatus(runtime["status"])
-        except ValueError:
-            pass
-        bot.last_message = runtime["last_message"]
-        bot.logged_in = runtime["logged_in"]
-    elif bot.status not in (BotStatus.STOPPED, BotStatus.IDLE, BotStatus.ERROR):
-        bot.status = BotStatus.STOPPED
-        bot.last_message = "Not running - click Start"
-
-    return bot
+    return _apply_runtime(await _load_bot(bot_id))
 
 
 @api_router.patch("/bots/{bot_id}", response_model=Bot)
@@ -410,41 +517,26 @@ async def update_bot(bot_id: str, payload: BotUpdate):
 
 @api_router.delete("/bots/{bot_id}")
 async def delete_bot(bot_id: str):
-    await _load_bot(bot_id)
-    await bot_manager.delete_bot_data(bot_id)
-    await bot_store.delete_bot(bot_id)
-    return {"deleted": bot_id}
+    deleted_id = await _delete_bot_record(bot_id)
+    return {"deleted": deleted_id}
 
 
 @api_router.post("/bots/{bot_id}/start", response_model=Bot)
 async def start_bot(bot_id: str):
-    bot = await _load_bot(bot_id)
-
     try:
-        instance = await bot_manager.start_bot(bot.id, bot.nickname, bot.room_url)
-        bot.status = BotStatus.STARTING
-        bot.display_num = instance.display_num
-        bot.vnc_port = instance.vnc_port
-        bot.last_message = instance.last_message
-        await _save_bot(bot)
+        return await _start_bot_record(bot_id)
     except Exception as exc:
         logger.exception("start_bot failed")
+        bot = await _load_bot(bot_id)
         bot.status = BotStatus.ERROR
         bot.last_message = str(exc)[:250]
         await _save_bot(bot)
         raise HTTPException(500, str(exc))
 
-    return bot
-
 
 @api_router.post("/bots/{bot_id}/stop", response_model=Bot)
 async def stop_bot(bot_id: str):
-    bot = await _load_bot(bot_id)
-    await bot_manager.stop_bot(bot_id)
-    bot.status = BotStatus.STOPPED
-    bot.last_message = "Stopped by user"
-    await _save_bot(bot)
-    return bot
+    return await _stop_bot_record(bot_id)
 
 
 @api_router.get("/bots/{bot_id}/status", response_model=BotRuntimeInfo)

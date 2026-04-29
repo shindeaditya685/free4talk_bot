@@ -26,6 +26,39 @@ python server.py
 
 If `MONGO_URL` is empty, the backend stores bot metadata in `backend/data/bots.json` on Windows or `/data/bots.json` on Linux.
 
+### Telegram control bot
+
+The backend can also run a Telegram control bot that manages your Free4Talk bots over chat. It uses long polling, so you do not need to configure Telegram webhooks.
+
+Set these env vars in `backend/.env` or your deployment platform:
+
+```env
+TELEGRAM_BOT_TOKEN=123456:telegram-bot-token
+TELEGRAM_ALLOWED_CHAT_IDS=123456789
+PUBLIC_BASE_URL=https://your-app-domain.example
+```
+
+Notes:
+
+- `TELEGRAM_BOT_TOKEN` enables the Telegram bot.
+- `TELEGRAM_ALLOWED_CHAT_IDS` is optional but strongly recommended. It locks control to your own Telegram chat ids.
+- `PUBLIC_BASE_URL` is optional. If set, the Telegram bot can send dashboard and viewer links.
+
+Supported Telegram commands:
+
+- `/start` or `/help`
+- `/bots`
+- `/create Name | https://www.free4talk.com/room/...`
+- `/run <id-or-prefix>`
+- `/stop <id-or-prefix>`
+- `/status <id-or-prefix>`
+- `/viewer <id-or-prefix>`
+- `/delete <id-or-prefix>`
+- `/dashboard`
+- `/whoami`
+
+The Telegram bot also sends crash alerts when Chromium shows an `Aw, Snap!` page or the room tab crashes. For proactive alerts, set `TELEGRAM_ALLOWED_CHAT_IDS` so the app knows exactly which chat ids should receive them.
+
 ### Frontend
 
 1. Create `frontend/.env` from `frontend/.env.example` if you want to override the backend URL in Vite dev.
@@ -63,6 +96,9 @@ Sources: [Railway free trial](https://docs.railway.com/pricing/free-trial), [Rai
 BOT_DATA_DIR=/data
 CORS_ORIGINS=*
 HOST=0.0.0.0
+PUBLIC_BASE_URL=https://your-service-name.up.railway.app
+TELEGRAM_BOT_TOKEN=123456:telegram-bot-token
+TELEGRAM_ALLOWED_CHAT_IDS=123456789
 ```
 
 6. Do not set `PORT` manually unless Railway support asks you to. Railway injects it automatically and the backend already reads it.

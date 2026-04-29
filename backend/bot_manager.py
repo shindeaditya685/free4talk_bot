@@ -19,7 +19,7 @@ import socket
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Awaitable, Callable, Dict, Optional
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright, BrowserContext, Page
@@ -43,6 +43,15 @@ VNC_PORT_BASE = 5900
 SCREEN_WIDTH = 1366
 SCREEN_HEIGHT = 768
 SCREEN_GEOMETRY = f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}x24"
+NAVIGATION_TIMEOUT_MS = 20000
+CRASH_PAGE_MARKERS = (
+    "aw, snap!",
+    "something went wrong while displaying this webpage",
+    "error code:",
+)
+CRASH_ALERT_COOLDOWN_SECONDS = 300
+
+BotEventNotifier = Callable[[dict], Awaitable[None]]
 
 
 def _supports_managed_vnc() -> bool:
@@ -119,6 +128,8 @@ class BotInstance:
     logged_in: bool = False
     vnc_available: bool = False
     fullscreen_applied: bool = False
+    event_notifier: BotEventNotifier | None = None
+    last_crash_alert_at: float = 0.0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def set_status(self, status: str, message: str = "") -> None:
@@ -149,6 +160,116 @@ class BotInstance:
         if self.vnc_available:
             return "Sign in with Google via VNC"
         return "Sign in with Google in the local browser window"
+
+    def _is_browser_crash_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "target crashed",
+                "page crashed",
+                "target page, context or browser has been closed",
+                "browser has been closed",
+            )
+        )
+
+    async def _notify_event(self, payload: dict) -> None:
+        if not self.event_notifier:
+            return
+
+        try:
+            await self.event_notifier(payload)
+        except Exception as exc:
+            logger.warning("bot event notify failed for %s: %s", self.bot_id, exc)
+
+    async def _notify_crash(self, message: str, recovery_failed: bool = False) -> None:
+        now = asyncio.get_running_loop().time()
+        if not recovery_failed and now - self.last_crash_alert_at < CRASH_ALERT_COOLDOWN_SECONDS:
+            return
+
+        if not recovery_failed:
+            self.last_crash_alert_at = now
+
+        await self._notify_event(
+            {
+                "kind": "crash",
+                "bot_id": self.bot_id,
+                "nickname": self.nickname,
+                "room_url": self.room_url,
+                "message": message,
+                "recovery_failed": recovery_failed,
+            }
+        )
+
+    async def _goto_room(self, page: Page) -> None:
+        await page.goto(
+            self.room_url,
+            wait_until="domcontentloaded",
+            timeout=NAVIGATION_TIMEOUT_MS,
+        )
+
+    async def _ensure_active_page(self) -> Page:
+        if not self.browser_context:
+            raise RuntimeError("Browser context is unavailable")
+
+        if self.page and not self.page.is_closed():
+            return self.page
+
+        self.page = await self.browser_context.new_page()
+        self.fullscreen_applied = False
+        return self.page
+
+    async def _recover_room_page(self, reason: str) -> bool:
+        if not self.browser_context:
+            self.set_status("error", f"{reason}. Browser context is unavailable")
+            await self._notify_crash(
+                f"{reason}. Browser context is unavailable",
+                recovery_failed=True,
+            )
+            return False
+
+        self.set_status("joining", reason)
+        self.in_room = False
+        self.fullscreen_applied = False
+
+        if self.page and not self.page.is_closed():
+            try:
+                await self.page.close()
+            except Exception:
+                pass
+
+        self.page = None
+
+        try:
+            page = await self._ensure_active_page()
+            await self._goto_room(page)
+        except Exception as exc:
+            logger.warning("page recovery failed for %s: %s", self.bot_id, exc)
+            self.set_status("error", f"{reason}. Recovery failed: {str(exc)[:120]}")
+            await self._notify_crash(
+                f"{reason}. Recovery failed: {str(exc)[:120]}",
+                recovery_failed=True,
+            )
+            return False
+
+        return True
+
+    async def _is_crash_page(self, url: str) -> bool:
+        if url.startswith("chrome-error://"):
+            return True
+
+        if not self.page or self.page.is_closed():
+            return False
+
+        try:
+            page_text = await self.page.evaluate(
+                """() => `${document.title || ''}\n${document.body?.innerText || ''}`"""
+            )
+        except Exception as exc:
+            return self._is_browser_crash_error(exc)
+
+        normalized = str(page_text).lower()
+        return all(marker in normalized for marker in CRASH_PAGE_MARKERS[:2])
 
     async def _launch_browser_context(
         self, launch_args: list[str], env: dict[str, str]
@@ -245,6 +366,7 @@ class BotInstance:
         launch_args = [
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
             "--disable-blink-features=AutomationControlled",
             "--use-fake-ui-for-media-stream",
             "--mute-audio",
@@ -270,7 +392,7 @@ class BotInstance:
         else:
             self.page = await self.browser_context.new_page()
 
-        await self.page.goto(self.room_url, wait_until="domcontentloaded")
+        await self._goto_room(self.page)
         self.running = True
         self.set_status("waiting_login", self.login_instructions())
 
@@ -280,16 +402,29 @@ class BotInstance:
         while self.running and not self.stop_requested:
             try:
                 await asyncio.sleep(5)
-                if not self.page or self.page.is_closed():
-                    break
+                try:
+                    page = await self._ensure_active_page()
+                except Exception as exc:
+                    self.set_status("error", f"Browser page missing: {str(exc)[:120]}")
+                    await asyncio.sleep(5)
+                    continue
 
-                url = self.page.url
+                url = page.url
+                if await self._is_crash_page(url):
+                    await self._notify_crash("Chromium crashed - reopening room")
+                    recovered = await self._recover_room_page(
+                        "Chromium crashed - reopening room"
+                    )
+                    if not recovered:
+                        await asyncio.sleep(5)
+                    continue
+
                 on_google = "accounts.google.com" in url
                 on_f4t = "free4talk.com" in url
 
                 clicked_start = False
                 try:
-                    clicked_start = await self.page.evaluate("""() => {
+                    clicked_start = await page.evaluate("""() => {
                             const nodes = document.querySelectorAll('body *');
                             for (const n of nodes) {
                                 const t = (n.textContent || '').trim().toLowerCase();
@@ -315,7 +450,7 @@ class BotInstance:
 
                 if on_f4t:
                     try:
-                        has_login_btn = await self.page.evaluate("""() => {
+                        has_login_btn = await page.evaluate("""() => {
                                 const txt = (document.body.innerText || '').toLowerCase();
                                 return txt.includes('sign in') || txt.includes('login with google')
                                     || txt.includes('login google');
@@ -334,15 +469,13 @@ class BotInstance:
                 elif self.logged_in and not currently_in_room:
                     self.set_status("joining", "Rejoining room")
                     try:
-                        await self.page.goto(
-                            self.room_url, wait_until="domcontentloaded"
-                        )
+                        await self._goto_room(page)
                     except Exception as e:
                         logger.warning(f"goto failed: {e}")
                 elif currently_in_room and self.logged_in:
                     if self.vnc_available and not self.fullscreen_applied:
                         try:
-                            await self.page.keyboard.press("F11")
+                            await page.keyboard.press("F11")
                             self.fullscreen_applied = True
                             self.set_status("in_room", "Entered fullscreen room view")
                         except Exception as e:
@@ -356,12 +489,19 @@ class BotInstance:
                     self.set_status("starting", f"At {url[:80]}")
 
                 try:
-                    await self.page.mouse.move(
+                    await page.mouse.move(
                         640 + (int(asyncio.get_event_loop().time()) % 5), 400
                     )
                 except Exception:
                     pass
             except Exception as e:
+                if self._is_browser_crash_error(e):
+                    await self._notify_crash("Browser tab crashed - reopening room")
+                    recovered = await self._recover_room_page(
+                        "Browser tab crashed - reopening room"
+                    )
+                    if recovered:
+                        continue
                 logger.exception(f"monitor loop error: {e}")
                 self.set_status("error", str(e)[:200])
                 await asyncio.sleep(5)
@@ -416,6 +556,10 @@ class BotManager:
         self.instances: Dict[str, BotInstance] = {}
         self._start_tasks: Dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        self._event_notifier: BotEventNotifier | None = None
+
+    def set_event_notifier(self, notifier: BotEventNotifier | None) -> None:
+        self._event_notifier = notifier
 
     def _used_displays(self) -> set[int]:
         return {b.display_num for b in self.instances.values()}
@@ -473,6 +617,7 @@ class BotManager:
                     display_num=display_num,
                     vnc_port=vnc_port,
                     user_data_dir=user_data_dir,
+                    event_notifier=self._event_notifier,
                 )
                 self.instances[bot_id] = inst
                 start_task = asyncio.create_task(self._run_start(inst))
