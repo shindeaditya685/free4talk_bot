@@ -44,6 +44,7 @@ SCREEN_WIDTH = 1366
 SCREEN_HEIGHT = 768
 SCREEN_GEOMETRY = f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}x24"
 NAVIGATION_TIMEOUT_MS = 20000
+ROOM_PAGE_ZOOM = os.environ.get("ROOM_PAGE_ZOOM", "0.90").strip() or "0.90"
 CRASH_PAGE_MARKERS = (
     "aw, snap!",
     "something went wrong while displaying this webpage",
@@ -128,6 +129,7 @@ class BotInstance:
     logged_in: bool = False
     vnc_available: bool = False
     fullscreen_applied: bool = False
+    room_zoom_applied: bool = False
     event_notifier: BotEventNotifier | None = None
     last_crash_alert_at: float = 0.0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -202,6 +204,7 @@ class BotInstance:
         )
 
     async def _goto_room(self, page: Page) -> None:
+        self.room_zoom_applied = False
         await page.goto(
             self.room_url,
             wait_until="domcontentloaded",
@@ -217,6 +220,7 @@ class BotInstance:
 
         self.page = await self.browser_context.new_page()
         self.fullscreen_applied = False
+        self.room_zoom_applied = False
         return self.page
 
     async def _recover_room_page(self, reason: str) -> bool:
@@ -231,6 +235,7 @@ class BotInstance:
         self.set_status("joining", reason)
         self.in_room = False
         self.fullscreen_applied = False
+        self.room_zoom_applied = False
 
         if self.page and not self.page.is_closed():
             try:
@@ -270,6 +275,25 @@ class BotInstance:
 
         normalized = str(page_text).lower()
         return all(marker in normalized for marker in CRASH_PAGE_MARKERS[:2])
+
+    async def _apply_room_zoom(self, page: Page) -> None:
+        if self.room_zoom_applied:
+            return
+
+        try:
+            await page.evaluate(
+                """(zoomValue) => {
+                    document.documentElement.style.zoom = zoomValue;
+                    if (document.body) {
+                        document.body.style.zoom = zoomValue;
+                    }
+                    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+                }""",
+                ROOM_PAGE_ZOOM,
+            )
+            self.room_zoom_applied = True
+        except Exception as exc:
+            logger.warning("room zoom apply failed for %s: %s", self.bot_id, exc)
 
     async def _launch_browser_context(
         self, launch_args: list[str], env: dict[str, str]
@@ -365,6 +389,7 @@ class BotInstance:
         self.playwright_ctx = await async_playwright().start()
         launch_args = [
             "--no-sandbox",
+            "--test-type",
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--disable-blink-features=AutomationControlled",
@@ -473,6 +498,8 @@ class BotInstance:
                     except Exception as e:
                         logger.warning(f"goto failed: {e}")
                 elif currently_in_room and self.logged_in:
+                    await self._apply_room_zoom(page)
+
                     if self.vnc_available and not self.fullscreen_applied:
                         try:
                             await page.keyboard.press("F11")
